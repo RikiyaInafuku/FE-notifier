@@ -1,17 +1,13 @@
-name: FE seat watcher (IPA → 申込再開 → 沖縄3会場)
+name: watch
 
 on:
+  workflow_dispatch:
   schedule:
-    - cron: "*/30 * * * *"   # 30分ごと（UTC）
-  workflow_dispatch: {}       # 手動実行も可（動作確認用）
+    - cron: "*/30 * * * *"   # 30分ごと
 
 jobs:
   watch:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
-    concurrency:
-      group: fe-seat-watcher
-      cancel-in-progress: true
 
     steps:
       - name: Checkout
@@ -24,18 +20,21 @@ jobs:
 
       - name: Install deps
         run: |
-          python -m pip install --upgrade pip
           pip install -r requirements.txt
           python -m playwright install --with-deps chromium
+
+      - name: List files
+        run: ls -la
 
       - name: Run watcher
         env:
           IPA_USER_ID: ${{ secrets.IPA_USER_ID }}
           IPA_PASSWORD: ${{ secrets.IPA_PASSWORD }}
+          REGION_NAME: 九州・沖縄
+          PREF_NAME: 沖縄県
+          START_YM: 2025-11
+          TARGET_CENTERS: 沖縄県庁前テストセンター,那覇テストセンター,OAC沖縄校テストセンター
+          SEND_EMAIL: "false"  # 送るなら "true" と GMAIL_* も設定
           GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
-          REGION_NAME: "九州・沖縄"
-          PREF_NAME: "沖縄県"
-          START_YM: "2025-11"
-          TARGET_CENTERS: "沖縄県庁前テストセンター,那覇テストセンター,OAC沖縄校テストセンター"
-        run: python seat_watcher_ipa.py
+        run: python main.py
