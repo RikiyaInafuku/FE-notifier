@@ -1,4 +1,4 @@
-# watch.py
+# main.py
 # FE（基本情報技術者：CBT）空席ウォッチャー
 # - GitHub Actions のログで各ステップの PASS/WARN/FAIL を明示
 # - UIは「selectで地域/都道府県/月/日 → 検索 → 会場表（○）」に対応
@@ -38,9 +38,9 @@ TARGET_CENTERS = [s.strip() for s in os.environ.get(
 ).split(",") if s.strip()]
 
 # 通知（完全オプション）
-SEND_EMAIL        = truthy("SEND_EMAIL")
-GMAIL_ADDRESS     = os.environ.get("GMAIL_ADDRESS", "")
-GMAIL_APP_PASSWORD= os.environ.get("GMAIL_APP_PASSWORD", "")
+SEND_EMAIL         = truthy("SEND_EMAIL")
+GMAIL_ADDRESS      = os.environ.get("GMAIL_ADDRESS", "")
+GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "")
 
 # ===== ログ/アノテーション =====
 def ts() -> str: return datetime.utcnow().strftime("%Y-%m-%d %H:%M:%SZ")
@@ -68,6 +68,34 @@ def check(cond: bool, step: str, ok: str, ng: str, critical: bool = False):
         fail_mark(step, ng)
         if critical:
             raise RuntimeError(f"{step} 失敗: {ng}")
+
+# ===== ログイン入力の候補 & フォールバック =====
+LOGIN_ID_CAND = [
+    "input[name='loginId']", "input[name='userId']",
+    "#loginId", "#userId",
+    "input[autocomplete='username']",
+    "input[placeholder*='利用者ID']",
+    "input[type='text']",
+]
+LOGIN_PW_CAND = [
+    "input[name='password']", "#password",
+    "input[autocomplete='current-password']",
+    "input[type='password']",
+]
+
+def fill_any(page, selectors, value, step):
+    for sel in selectors:
+        loc = page.locator(sel).first
+        if loc.count():
+            try:
+                loc.scroll_into_view_if_needed()
+                loc.fill(value, timeout=5000)
+                pass_mark(step, f"{sel} で入力")
+                return True
+            except Exception as e:
+                warn_mark(step, f"{sel} 失敗: {e}")
+    fail_mark(step, f"{step} 候補全滅")
+    raise RuntimeError(f"{step} 失敗")
 
 # ===== ユーティリティ =====
 def send_gmail(subject: str, body: str):
@@ -107,29 +135,29 @@ def main():
             page.goto(IPA_LOGIN_URL, wait_until="domcontentloaded")
             check(page.locator("form").first.count() > 0, "ログインページ", "フォーム検出", "フォーム見当たらず", True)
 
-            # ラベル優先で入力、ダメならフォールバック
+            # ラベル優先 → 候補総当たり
             try:
-                page.get_by_label("利用者ID", exact=True).fill(IPA_USER_ID)
+                page.get_by_label("利用者ID", exact=True).fill(IPA_USER_ID, timeout=3000)
                 pass_mark("ID入力", "label=利用者ID")
             except Exception:
-                page.locator("input[name='loginId'], #loginId, input[autocomplete='username']").first.fill(IPA_USER_ID)
-                pass_mark("ID入力", "fallbackセレクタ")
+                fill_any(page, LOGIN_ID_CAND, IPA_USER_ID, "ID入力")
 
             try:
-                page.get_by_label("パスワード", exact=True).fill(IPA_PASSWORD)
+                page.get_by_label("パスワード", exact=True).fill(IPA_PASSWORD, timeout=3000)
                 pass_mark("PW入力", "label=パスワード")
             except Exception:
-                page.locator("input[name='password'], #password, input[type='password'], input[autocomplete='current-password']").first.fill(IPA_PASSWORD)
-                pass_mark("PW入力", "fallbackセレクタ")
+                fill_any(page, LOGIN_PW_CAND, IPA_PASSWORD, "PW入力")
 
+            # ログインボタン
             if page.get_by_role("button", name="ログイン").first.count():
                 page.get_by_role("button", name="ログイン").first.click()
             else:
                 page.locator("button:has-text('ログイン'), input[type='submit']").first.click()
             page.wait_for_load_state("domcontentloaded")
 
-            # 成功判定：ID入力欄が消えている
-            check(page.get_by_label("利用者ID", exact=True).first.count() == 0, "ログイン", "成功", "失敗の可能性", True)
+            # 成功判定：ログアウトUIが見える
+            logged_in = page.locator("a:has-text('ログアウト'), button:has-text('ログアウト')").first.count() > 0
+            check(logged_in, "ログイン", "成功", "失敗の可能性", True)
             group_end()
 
             # --- FE申込導線 ---
@@ -205,8 +233,8 @@ def main():
                 return sel.first if sel.count() else None
 
             # 地域/都道府県を固定
-            select_in_row("地域", REGION_NAME)   # 例: 九州・沖縄
-            select_in_row("都道府県", PREF_NAME) # 例: 沖縄県
+            select_in_row("地域", REGION_NAME)
+            select_in_row("都道府県", PREF_NAME)
 
             # 月/日 セレクト
             month_sel = get_select("月")
@@ -249,7 +277,6 @@ def main():
                 warn_mark("会場検索", "ボタンなし"); return False
 
             def extract_table_slots(selected_month: str, selected_day: str):
-                # 最も上の table を対象（画面上1つ想定）
                 tables = page.locator("table")
                 if tables.count() == 0:
                     warn_mark("会場表", "tableなし"); return
