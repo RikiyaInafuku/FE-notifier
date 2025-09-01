@@ -1,4 +1,4 @@
-name: watch
+name: Check FE
 
 on:
   workflow_dispatch:
