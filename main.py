@@ -219,64 +219,78 @@ def main():
             check(ok, "導線確認", "エリア・日程選択に到達", "ページ到達に失敗", True)
 
             # --- エリア/日程選択（select取得） ---
+                        # --- エリア・日程選択（select取得＋2秒ディレイ） ---
             group_start("エリア/日程選択")
-
-            def select_in_row(row_label: str, option_label: str) -> bool:
+            
+            def row_select(row_label: str):
                 row = page.locator("tr").filter(has_text=row_label)
                 if not row.count():
-                    warn_mark("選択行", f"'{row_label}' 行なし"); return False
-                sel = row.first.locator("select")
+                    fail_mark("選択行", f"'{row_label}' 行なし"); return None
+                sel = row.first.locator("select").first
                 if not sel.count():
-                    warn_mark("選択UI", f"'{row_label}' に select なし"); return False
+                    fail_mark("選択UI", f"'{row_label}' に select なし"); return None
+                sel.wait_for(state="visible", timeout=10000)
+                return sel
+            
+            def select_label(sel, label: str) -> bool:
+                if not sel: return False
                 try:
-                    sel.first.select_option(label=option_label)
-                    pass_mark("選択", f"{row_label}: {option_label}")
+                    sel.select_option(label=label, timeout=30000)
+                    pass_mark("選択", f"{label}")
                     return True
                 except Exception as e:
-                    fail_mark("選択", f"{row_label}: '{option_label}' 選択失敗 ({e})"); return False
-
-            def get_select(row_label: str):
-                row = page.locator("tr").filter(has_text=row_label)
-                if not row.count(): return None
-                sel = row.first.locator("select")
-                return sel.first if sel.count() else None
-
-            select_in_row("地域", REGION_NAME)
-            select_in_row("都道府県", PREF_NAME)
-
-            month_sel = get_select("月")
-            day_sel   = get_select("日")
+                    fail_mark("選択", f"'{label}' 選択失敗 ({e})")
+                    return False
+            
+            # 1) 地域 → 2秒待つ（都道府県の選択肢が出るまでJSで遅延）
+            region_sel = row_select("地域")
+            select_label(region_sel, REGION_NAME)
+            page.wait_for_timeout(2000)  # ★ここがポイント
+            
+            # 2) 都道府県（地域選択でDOMが差し替わる可能性があるので取り直す）
+            pref_sel = row_select("都道府県")
+            pref_sel = row_select("都道府県")  # 念のため再取得
+            select_label(pref_sel, PREF_NAME)
+            
+            # 3) 月・日 select を取得
+            month_sel = row_select("月")
+            day_sel   = row_select("日")
             check(bool(month_sel and day_sel), "セレクト取得", "月/日を取得", "月/日セレクトが無い", True)
-
+            
+            # START_YM 以降の月だけに絞る
             sy, sm = map(int, START_YM.split("-"))
-
             month_opts = []
             for i in range(month_sel.locator("option").count()):
                 lb = (month_sel.locator("option").nth(i).inner_text() or "").strip()
                 pm = parse_month_label(lb)
                 if pm and ((pm[0] > sy) or (pm[0] == sy and pm[1] >= sm)):
                     month_opts.append(lb)
-            if not month_opts: warn_mark("月", f"{START_YM} 以降の候補なし")
-
+            if not month_opts:
+                warn_mark("月", f"{START_YM} 以降の候補なし")
+            
+            # 日レンジ（プレースホルダ除外）
             day_opts = []
             for i in range(day_sel.locator("option").count()):
                 lb = (day_sel.locator("option").nth(i).inner_text() or "").strip()
-                if "選択" in lb or lb == "": continue
+                if "選択" in lb or lb == "":
+                    continue
                 day_opts.append((i, lb))
-            if not day_opts: warn_mark("日", "有効な日レンジが見つからない")
-
+            if not day_opts:
+                warn_mark("日", "有効な日レンジが見つからない")
+            
             group_end()
-
+            
             # --- 検索・抽出ループ ---
             group_start("検索・抽出ループ")
-
+            
             def click_search() -> bool:
                 btn = page.get_by_role("button", name="検索").first
                 if btn.count():
-                    btn.click(); page.wait_for_load_state("domcontentloaded")
+                    btn.click()
+                    page.wait_for_load_state("domcontentloaded")
                     pass_mark("会場検索", "検索押下"); return True
                 warn_mark("会場検索", "ボタンなし"); return False
-
+            
             def extract_table_slots(selected_month: str, selected_day: str):
                 tables = page.locator("table")
                 if tables.count() == 0:
@@ -286,12 +300,13 @@ def main():
                 for i in range(rows.count()):
                     r = rows.nth(i)
                     name = ""
-                    if r.locator("a").count(): name = (r.locator("a").first.inner_text() or "").strip()
+                    if r.locator("a").count():
+                        name = (r.locator("a").first.inner_text() or "").strip()
                     else:
                         try: name = (r.locator("td").first.inner_text() or "").strip()
                         except Exception: name = ""
                     if not name or not any(c in name for c in TARGET_CENTERS): continue
-
+            
                     matched += 1; pass_mark("会場一致", name)
                     cells = r.locator("a:has-text('○'), button:has-text('○'), td:has-text('○')")
                     cnt = cells.count()
@@ -307,10 +322,11 @@ def main():
                         found_lines.append(line)
                     pass_mark("枠抽出", f"{name}: {cnt}件")
                 if matched == 0: warn_mark("会場一致", "指定会場ヒットなし（表記ぶれの可能性）")
-
+            
+            # 総当たり：月 × 日
             loop_months = month_opts if month_opts else [""]
             loop_days   = day_opts   if day_opts   else [(1, "任意")]
-
+            
             for m_lb in loop_months:
                 if m_lb:
                     try: month_sel.select_option(label=m_lb); pass_mark("月選択", m_lb)
@@ -319,7 +335,7 @@ def main():
                     try: day_sel.select_option(index=day_index); pass_mark("日選択", day_lb)
                     except Exception as e: warn_mark("日選択", f"'{day_lb}' 選択失敗: {e}"); continue
                     if click_search(): extract_table_slots(m_lb or "(指定なし)", day_lb)
-
+            
             group_end()
 
             # --- ログアウト（任意） ---
