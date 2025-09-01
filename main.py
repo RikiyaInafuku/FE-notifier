@@ -1,9 +1,9 @@
 # main.py
 # FE（基本情報技術者：CBT）空席ウォッチャー
-# - GitHub Actions のログで各ステップの PASS/WARN/FAIL を明示
-# - UIは「selectで地域/都道府県/月/日 → 検索 → 会場表（○）」に対応
-# - 2025-11以降の全月 × 全日レンジを総当たりして「○」を収集
-# - Gmail通知は任意（SEND_EMAIL=true のときだけ使用）
+# - Actionsログに PASS/WARN/FAIL を出力
+# - UI: 「地域/都道府県/月/日 を select → 検索 → ○ を抽出」
+# - 2025-11以降の月 × 全日レンジを総当たり
+# - Gmail通知は SEND_EMAIL=true の時のみ
 
 import os, re, ssl, smtplib
 from email.message import EmailMessage
@@ -11,8 +11,8 @@ from datetime import datetime
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
 # ===== 固定URL =====
-IPA_LOGIN_URL = "https://itee.ipa.go.jp/ipa/user/public/login/"
-IPA_FE_ENTRY_URL = "https://itee.ipa.go.jp/ipa/user/public/cbt_entry/fc_fe/"
+IPA_LOGIN_URL   = "https://itee.ipa.go.jp/ipa/user/public/login/"
+IPA_FE_ENTRY_URL= "https://itee.ipa.go.jp/ipa/user/public/cbt_entry/fc_fe/"
 
 # ===== 必須/任意環境変数 =====
 def need(name: str) -> str:
@@ -24,20 +24,17 @@ def need(name: str) -> str:
 def truthy(name: str) -> bool:
     return os.environ.get(name, "").lower() in ("1", "true", "yes", "on")
 
-# 必須
 IPA_USER_ID  = need("IPA_USER_ID")
 IPA_PASSWORD = need("IPA_PASSWORD")
 
-# 任意（デフォルトあり）
 REGION_NAME = os.environ.get("REGION_NAME", "九州・沖縄")
 PREF_NAME   = os.environ.get("PREF_NAME", "沖縄県")
-START_YM    = os.environ.get("START_YM", "2025-11")  # 2025年11月以降
+START_YM    = os.environ.get("START_YM", "2025-11")
 TARGET_CENTERS = [s.strip() for s in os.environ.get(
     "TARGET_CENTERS",
     "沖縄県庁前テストセンター,那覇テストセンター,OAC沖縄校テストセンター"
 ).split(",") if s.strip()]
 
-# 通知（完全オプション）
 SEND_EMAIL         = truthy("SEND_EMAIL")
 GMAIL_ADDRESS      = os.environ.get("GMAIL_ADDRESS", "")
 GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "")
@@ -45,29 +42,16 @@ GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "")
 # ===== ログ/アノテーション =====
 def ts() -> str: return datetime.utcnow().strftime("%Y-%m-%d %H:%M:%SZ")
 def info(msg: str): print(f"[{ts()}] {msg}", flush=True)
-
-def pass_mark(step: str, detail: str = ""):
-    print(f"::notice title={step}::PASS {detail}")
-    info(f"[PASS] {step} {('- ' + detail) if detail else ''}")
-
-def warn_mark(step: str, detail: str = ""):
-    print(f"::warning title={step}::{detail}")
-    info(f"[WARN] {step} {('- ' + detail) if detail else ''}")
-
-def fail_mark(step: str, detail: str = ""):
-    print(f"::error title={step}::FAIL {detail}")
-    info(f"[FAIL] {step} {('- ' + detail) if detail else ''}")
-
+def pass_mark(step: str, detail: str = ""): print(f"::notice title={step}::PASS {detail}")
+def warn_mark(step: str, detail: str = ""): print(f"::warning title={step}::{detail}")
+def fail_mark(step: str, detail: str = ""): print(f"::error title={step}::FAIL {detail}")
 def group_start(title: str): print(f"::group::{title}")
 def group_end(): print("::endgroup::")
-
 def check(cond: bool, step: str, ok: str, ng: str, critical: bool = False):
-    if cond:
-        pass_mark(step, ok)
+    if cond: pass_mark(step, ok)
     else:
         fail_mark(step, ng)
-        if critical:
-            raise RuntimeError(f"{step} 失敗: {ng}")
+        if critical: raise RuntimeError(f"{step} 失敗: {ng}")
 
 # ===== ログイン入力の候補 & フォールバック =====
 LOGIN_ID_CAND = [
@@ -82,7 +66,6 @@ LOGIN_PW_CAND = [
     "input[autocomplete='current-password']",
     "input[type='password']",
 ]
-
 def fill_any(page, selectors, value, step):
     for sel in selectors:
         loc = page.locator(sel).first
@@ -90,12 +73,10 @@ def fill_any(page, selectors, value, step):
             try:
                 loc.scroll_into_view_if_needed()
                 loc.fill(value, timeout=5000)
-                pass_mark(step, f"{sel} で入力")
-                return True
+                pass_mark(step, f"{sel} で入力"); return True
             except Exception as e:
                 warn_mark(step, f"{sel} 失敗: {e}")
-    fail_mark(step, f"{step} 候補全滅")
-    raise RuntimeError(f"{step} 失敗")
+    fail_mark(step, f"{step} 候補全滅"); raise RuntimeError(f"{step} 失敗")
 
 # ===== ユーティリティ =====
 def send_gmail(subject: str, body: str):
@@ -105,13 +86,10 @@ def send_gmail(subject: str, body: str):
         fail_mark("通知(メール)", "GMAIL_ADDRESS/GMAIL_APP_PASSWORD 未設定"); return
     try:
         msg = EmailMessage()
-        msg["Subject"] = subject
-        msg["From"] = GMAIL_ADDRESS
-        msg["To"] = GMAIL_ADDRESS
+        msg["Subject"] = subject; msg["From"] = GMAIL_ADDRESS; msg["To"] = GMAIL_ADDRESS
         msg.set_content(body)
         with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=ssl.create_default_context()) as s:
-            s.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
-            s.send_message(msg)
+            s.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD); s.send_message(msg)
         pass_mark("通知(メール)", "SMTP送信成功")
     except Exception as e:
         fail_mark("通知(メール)", f"例外: {e}")
@@ -120,22 +98,76 @@ def parse_month_label(lb: str):
     m = re.search(r"(\d{4})年\s*(\d{1,2})月", lb)
     return (int(m.group(1)), int(m.group(2))) if m else None
 
+# ===== 導線（エリア・日程選択ページへ確実に到達） =====
+def on_area_date(page) -> bool:
+    return page.get_by_text("エリア・日程選択", exact=False).first.count() > 0
+
+def goto_area_date_page(page) -> bool:
+    group_start("FE申込導線")
+    try:
+        # 1) 直リンク
+        page.goto(IPA_FE_ENTRY_URL, wait_until="domcontentloaded")
+        info(f"URL: {page.url}")
+        if on_area_date(page):
+            pass_mark("導線", "直リンクで到達"); return True
+
+        # 2) 申込再開
+        el = page.locator("a:has-text('申込再開'), button:has-text('申込再開')").first
+        if el.count():
+            el.click(); page.wait_for_load_state("domcontentloaded")
+            info(f"URL: {page.url}")
+            if on_area_date(page):
+                pass_mark("導線", "申込再開→到達"); return True
+
+        # 3) 試験選択（FE行の次へ）
+        rows = page.locator("tr").filter(has_text="基本情報技術者試験(FE)科目A・科目B")
+        if rows.count():
+            rows.first.get_by_role("button", name="次へ").click()
+            page.wait_for_load_state("domcontentloaded")
+            info(f"URL: {page.url}")
+
+        # 4) アンケ（学生/同意→次へ）
+        if page.get_by_label("学生", exact=True).first.count():
+            page.get_by_label("学生", exact=True).first.check()
+            pass_mark("区分選択", "学生")
+        if page.get_by_label("同意する", exact=True).first.count():
+            page.get_by_label("同意する", exact=True).first.check()
+            pass_mark("同意確認", "同意する")
+        if page.get_by_role("button", name="次へ").first.count():
+            page.get_by_role("button", name="次へ").first.click()
+            page.wait_for_load_state("domcontentloaded")
+            info(f"URL: {page.url}")
+        if on_area_date(page):
+            pass_mark("導線", "試験選択/アンケ後に到達"); return True
+
+        # 5) 左メニュー保険
+        link_fe = page.get_by_role("link", name=re.compile(r"基本情報技術者試験\(FE\)"))
+        if link_fe.first.count():
+            link_fe.first.click(); page.wait_for_load_state("domcontentloaded")
+        link_apply = page.get_by_role("link", name=re.compile(r"CBT試験申込"))
+        if link_apply.first.count():
+            link_apply.first.click(); page.wait_for_load_state("domcontentloaded")
+        info(f"URL: {page.url}")
+        if on_area_date(page):
+            pass_mark("導線", "左メニューから到達"); return True
+
+        warn_mark("導線", "エリア・日程選択に未到達"); return False
+    finally:
+        group_end()
+
 # ===== メイン =====
 def main():
     found_lines = []
-
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context()
         page = context.new_page()
-
         try:
             # --- ログイン ---
             group_start("IPAログイン")
             page.goto(IPA_LOGIN_URL, wait_until="domcontentloaded")
             check(page.locator("form").first.count() > 0, "ログインページ", "フォーム検出", "フォーム見当たらず", True)
 
-            # ラベル優先 → 候補総当たり
             try:
                 page.get_by_label("利用者ID", exact=True).fill(IPA_USER_ID, timeout=3000)
                 pass_mark("ID入力", "label=利用者ID")
@@ -148,67 +180,21 @@ def main():
             except Exception:
                 fill_any(page, LOGIN_PW_CAND, IPA_PASSWORD, "PW入力")
 
-            # ログインボタン
             if page.get_by_role("button", name="ログイン").first.count():
                 page.get_by_role("button", name="ログイン").first.click()
             else:
                 page.locator("button:has-text('ログイン'), input[type='submit']").first.click()
             page.wait_for_load_state("domcontentloaded")
 
-            # 成功判定：ログアウトUIが見える
             logged_in = page.locator("a:has-text('ログアウト'), button:has-text('ログアウト')").first.count() > 0
             check(logged_in, "ログイン", "成功", "失敗の可能性", True)
             group_end()
 
-            # --- FE申込導線 ---
-            group_start("FE申込導線")
-            page.goto(IPA_FE_ENTRY_URL, wait_until="domcontentloaded")
-            pass_mark("FE申込ページ", "到達")
+            # --- エリア・日程選択ページへ ---
+            ok = goto_area_date_page(page)
+            check(ok, "導線確認", "エリア・日程選択に到達", "ページ到達に失敗", True)
 
-            # 申込再開（あれば）
-            if page.locator("a:has-text('申込再開'), button:has-text('申込再開')").first.count():
-                page.locator("a:has-text('申込再開'), button:has-text('申込再開')").first.click()
-                page.wait_for_load_state("domcontentloaded")
-                pass_mark("申込再開", "クリック")
-            else:
-                warn_mark("申込再開", "ボタンなし→スキップ")
-
-            # 試験選択（行内の「次へ」）
-            try:
-                rows = page.locator("tr").filter(has_text="基本情報技術者試験(FE)科目A・科目B")
-                if rows.count():
-                    rows.first.get_by_role("button", name="次へ").click()
-                    page.wait_for_load_state("domcontentloaded")
-                    pass_mark("試験選択", "FE 科目A/B 行の『次へ』")
-                else:
-                    warn_mark("試験選択", "画面出ず/行なし→スキップ")
-            except PWTimeout:
-                warn_mark("試験選択", "タイムアウト→スキップ")
-            group_end()
-
-            # --- 区分/同意 ---
-            group_start("区分/同意")
-            if page.get_by_label("学生", exact=True).first.count():
-                page.get_by_label("学生", exact=True).first.check()
-                pass_mark("区分選択", "学生")
-            else:
-                warn_mark("区分選択", "学生ラジオなし")
-
-            if page.get_by_label("同意する", exact=True).first.count():
-                page.get_by_label("同意する", exact=True).first.check()
-                pass_mark("同意確認", "同意する")
-            else:
-                warn_mark("同意確認", "同意UIなし")
-
-            if page.get_by_role("button", name="次へ").first.count():
-                page.get_by_role("button", name="次へ").first.click()
-                page.wait_for_load_state("domcontentloaded")
-                pass_mark("次へ", "アンケートから遷移")
-            else:
-                warn_mark("次へ", "ボタンなし（画面分岐）")
-            group_end()
-
-            # --- エリア/日程選択（select） ---
+            # --- エリア/日程選択（select取得） ---
             group_start("エリア/日程選択")
 
             def select_in_row(row_label: str, option_label: str) -> bool:
@@ -223,8 +209,7 @@ def main():
                     pass_mark("選択", f"{row_label}: {option_label}")
                     return True
                 except Exception as e:
-                    fail_mark("選択", f"{row_label}: '{option_label}' 選択失敗 ({e})")
-                    return False
+                    fail_mark("選択", f"{row_label}: '{option_label}' 選択失敗 ({e})"); return False
 
             def get_select(row_label: str):
                 row = page.locator("tr").filter(has_text=row_label)
@@ -232,34 +217,27 @@ def main():
                 sel = row.first.locator("select")
                 return sel.first if sel.count() else None
 
-            # 地域/都道府県を固定
             select_in_row("地域", REGION_NAME)
             select_in_row("都道府県", PREF_NAME)
 
-            # 月/日 セレクト
             month_sel = get_select("月")
             day_sel   = get_select("日")
             check(bool(month_sel and day_sel), "セレクト取得", "月/日を取得", "月/日セレクトが無い", True)
 
             sy, sm = map(int, START_YM.split("-"))
 
-            # 月候補（START_YM 以降）
             month_opts = []
             for i in range(month_sel.locator("option").count()):
                 lb = (month_sel.locator("option").nth(i).inner_text() or "").strip()
                 pm = parse_month_label(lb)
-                if not pm:  # 「選択してください」など
-                    continue
-                if (pm[0] > sy) or (pm[0] == sy and pm[1] >= sm):
+                if pm and ((pm[0] > sy) or (pm[0] == sy and pm[1] >= sm)):
                     month_opts.append(lb)
             if not month_opts: warn_mark("月", f"{START_YM} 以降の候補なし")
 
-            # 日候補（先頭のプレースホルダ除外）
             day_opts = []
             for i in range(day_sel.locator("option").count()):
                 lb = (day_sel.locator("option").nth(i).inner_text() or "").strip()
-                if "選択" in lb or lb == "":
-                    continue
+                if "選択" in lb or lb == "": continue
                 day_opts.append((i, lb))
             if not day_opts: warn_mark("日", "有効な日レンジが見つからない")
 
@@ -269,41 +247,32 @@ def main():
             group_start("検索・抽出ループ")
 
             def click_search() -> bool:
-                if page.get_by_role("button", name="検索").first.count():
-                    page.get_by_role("button", name="検索").first.click()
-                    page.wait_for_load_state("domcontentloaded")
-                    pass_mark("会場検索", "検索押下")
-                    return True
+                btn = page.get_by_role("button", name="検索").first
+                if btn.count():
+                    btn.click(); page.wait_for_load_state("domcontentloaded")
+                    pass_mark("会場検索", "検索押下"); return True
                 warn_mark("会場検索", "ボタンなし"); return False
 
             def extract_table_slots(selected_month: str, selected_day: str):
                 tables = page.locator("table")
                 if tables.count() == 0:
                     warn_mark("会場表", "tableなし"); return
-
                 rows = tables.first.locator("tr")
                 matched = 0
                 for i in range(rows.count()):
                     r = rows.nth(i)
-                    # 会場名（a要素優先）
                     name = ""
-                    if r.locator("a").count():
-                        name = (r.locator("a").first.inner_text() or "").strip()
+                    if r.locator("a").count(): name = (r.locator("a").first.inner_text() or "").strip()
                     else:
                         try: name = (r.locator("td").first.inner_text() or "").strip()
                         except Exception: name = ""
-                    if not name or not any(c in name for c in TARGET_CENTERS):
-                        continue
+                    if not name or not any(c in name for c in TARGET_CENTERS): continue
 
-                    matched += 1
-                    pass_mark("会場一致", name)
-
+                    matched += 1; pass_mark("会場一致", name)
                     cells = r.locator("a:has-text('○'), button:has-text('○'), td:has-text('○')")
                     cnt = cells.count()
                     if cnt == 0:
-                        warn_mark("枠抽出", f"{name}: 0件")
-                        continue
-
+                        warn_mark("枠抽出", f"{name}: 0件"); continue
                     for j in range(cnt):
                         t = (cells.nth(j).inner_text() or "").strip()
                         href = ""
@@ -313,41 +282,27 @@ def main():
                         if href: line += f" | {href}"
                         found_lines.append(line)
                     pass_mark("枠抽出", f"{name}: {cnt}件")
+                if matched == 0: warn_mark("会場一致", "指定会場ヒットなし（表記ぶれの可能性）")
 
-                if matched == 0:
-                    warn_mark("会場一致", "指定会場ヒットなし（表記ぶれの可能性）")
-
-            # 総当たり：月 × 日レンジ
             loop_months = month_opts if month_opts else [""]
             loop_days   = day_opts   if day_opts   else [(1, "任意")]
 
             for m_lb in loop_months:
                 if m_lb:
-                    try:
-                        month_sel.select_option(label=m_lb)
-                        pass_mark("月選択", m_lb)
-                    except Exception as e:
-                        warn_mark("月選択", f"'{m_lb}' 選択失敗: {e}")
-                        continue
+                    try: month_sel.select_option(label=m_lb); pass_mark("月選択", m_lb)
+                    except Exception as e: warn_mark("月選択", f"'{m_lb}' 選択失敗: {e}"); continue
                 for day_index, day_lb in loop_days:
-                    try:
-                        day_sel.select_option(index=day_index)
-                        pass_mark("日選択", day_lb)
-                    except Exception as e:
-                        warn_mark("日選択", f"'{day_lb}' 選択失敗: {e}")
-                        continue
-
-                    if click_search():
-                        extract_table_slots(m_lb or "(指定なし)", day_lb)
+                    try: day_sel.select_option(index=day_index); pass_mark("日選択", day_lb)
+                    except Exception as e: warn_mark("日選択", f"'{day_lb}' 選択失敗: {e}"); continue
+                    if click_search(): extract_table_slots(m_lb or "(指定なし)", day_lb)
 
             group_end()
 
             # --- ログアウト（任意） ---
             group_start("ログアウト")
-            if page.locator("a:has-text('ログアウト'), button:has-text('ログアウト')").first.count():
-                page.locator("a:has-text('ログアウト'), button:has-text('ログアウト')").first.click()
-                page.wait_for_load_state("domcontentloaded")
-                pass_mark("ログアウト", "成功")
+            lg = page.locator("a:has-text('ログアウト'), button:has-text('ログアウト')").first
+            if lg.count():
+                lg.click(); page.wait_for_load_state("domcontentloaded"); pass_mark("ログアウト", "成功")
             else:
                 warn_mark("ログアウト", "UIなし（自然失効想定）")
             group_end()
@@ -360,7 +315,7 @@ def main():
     info(f"検出件数: {len(found_lines)}")
     if found_lines:
         pass_mark("実行結果", f"空き枠 {len(found_lines)}件 検出")
-        body = "対象: 地域={0} / 都道府県={1} / 開始月={2}\n\n".format(REGION_NAME, PREF_NAME, START_YM) + "\n".join(found_lines)
+        body = f"対象: 地域={REGION_NAME} / 都道府県={PREF_NAME} / 開始月={START_YM}\n\n" + "\n".join(found_lines)
         send_gmail("【CBTS/IPA】基本情報（沖縄3会場）空き枠を検出しました", body)
     else:
         warn_mark("実行結果", "空き枠は検出されませんでした")
