@@ -100,58 +100,82 @@ def parse_month_label(lb: str):
 
 # ===== 導線（エリア・日程選択ページへ確実に到達） =====
 def on_area_date(page) -> bool:
-    return page.get_by_text("エリア・日程選択", exact=False).first.count() > 0
+    # 見出し or セレクト群 + 検索ボタンのどちらかで到達判定を広げる
+    if page.get_by_text("エリア・日程選択", exact=False).first.count():
+        return True
+    has_region = page.locator("tr", has_text="地域").first.locator("select").count() > 0
+    has_pref   = page.locator("tr", has_text="都道府県").first.locator("select").count() > 0
+    has_search = page.get_by_role("button", name="検索").first.count() > 0
+    return has_region and has_pref and has_search
 
 def goto_area_date_page(page) -> bool:
     group_start("FE申込導線")
     try:
-        # 1) 直リンク
-        page.goto(IPA_FE_ENTRY_URL, wait_until="domcontentloaded")
-        info(f"URL: {page.url}")
+        # 1) マイページ中央タイル → 「基本情報技術者試験(FE) CBT試験申込」
+        link = page.get_by_role("link", name=re.compile(r"基本情報技術者試験\(FE\)\s*CBT試験申込"))
+        if link.first.count():
+            link.first.click(); page.wait_for_load_state("domcontentloaded")
+        else:
+            # 左メニューから辿る
+            fe = page.get_by_role("link", name=re.compile(r"基本情報技術者試験\(FE\)"))
+            if fe.first.count():
+                fe.first.click(); page.wait_for_load_state("domcontentloaded")
+                l2 = page.get_by_role("link", name=re.compile(r"CBT試験申込"))
+                if l2.first.count():
+                    l2.first.click(); page.wait_for_load_state("domcontentloaded")
+            else:
+                # 最終手段: 直URL
+                page.goto(IPA_FE_ENTRY_URL, wait_until="domcontentloaded")
+        info(f"到達1: {page.url}")
         if on_area_date(page):
-            pass_mark("導線", "直リンクで到達"); return True
+            pass_mark("導線", "到達(エリア・日程)"); return True
 
-        # 2) 申込再開
-        el = page.locator("a:has-text('申込再開'), button:has-text('申込再開')").first
-        if el.count():
-            el.click(); page.wait_for_load_state("domcontentloaded")
-            info(f"URL: {page.url}")
-            if on_area_date(page):
-                pass_mark("導線", "申込再開→到達"); return True
+        # 2) 一番下の「申込再開」
+        btn = page.get_by_role("button", name=re.compile(r"申込再開"))
+        if not btn.first.count():
+            btn = page.locator("a:has-text('申込再開'), button:has-text('申込再開')")
+        if btn.first.count():
+            btn.first.scroll_into_view_if_needed()
+            btn.first.click(); page.wait_for_load_state("domcontentloaded")
+        info(f"到達2: {page.url}")
+        if on_area_date(page):
+            pass_mark("導線", "申込再開→到達"); return True
 
-        # 3) 試験選択（FE行の次へ）
-        rows = page.locator("tr").filter(has_text="基本情報技術者試験(FE)科目A・科目B")
-        if rows.count():
-            rows.first.get_by_role("button", name="次へ").click()
+        # 3) Step1 の赤い「選択する / 入力はこちらから」
+        selbtn = page.get_by_role("button", name=re.compile(r"選択する|入力はこちらから"))
+        if not selbtn.first.count():
+            selbtn = page.locator("a:has-text('選択する'), a:has-text('入力はこちらから'), button:has-text('選択する')")
+        if selbtn.first.count():
+            selbtn.first.click(); page.wait_for_load_state("domcontentloaded")
+        info(f"到達3: {page.url}")
+
+        # 4) 試験一覧 → 「基本情報技術者試験(FE)科目A・科目B …」行の「次へ」
+        row = page.locator("tr").filter(has_text=re.compile(r"基本情報技術者試験\(FE\).*科目A.*科目B"))
+        if row.count() and row.first.get_by_role("button", name="次へ").count():
+            row.first.get_by_role("button", name="次へ").click()
             page.wait_for_load_state("domcontentloaded")
-            info(f"URL: {page.url}")
+        else:
+            nx = page.get_by_role("button", name="次へ")
+            if nx.first.count():
+                nx.first.click(); page.wait_for_load_state("domcontentloaded")
+        info(f"到達4: {page.url}")
 
-        # 4) アンケ（学生/同意→次へ）
+        # 5) アンケ：学生 + 同意する → 次へ
         if page.get_by_label("学生", exact=True).first.count():
             page.get_by_label("学生", exact=True).first.check()
             pass_mark("区分選択", "学生")
         if page.get_by_label("同意する", exact=True).first.count():
             page.get_by_label("同意する", exact=True).first.check()
             pass_mark("同意確認", "同意する")
-        if page.get_by_role("button", name="次へ").first.count():
-            page.get_by_role("button", name="次へ").first.click()
-            page.wait_for_load_state("domcontentloaded")
-            info(f"URL: {page.url}")
-        if on_area_date(page):
-            pass_mark("導線", "試験選択/アンケ後に到達"); return True
+        nx = page.get_by_role("button", name="次へ")
+        if nx.first.count():
+            nx.first.click(); page.wait_for_load_state("domcontentloaded")
+        info(f"到達5: {page.url}")
 
-        # 5) 左メニュー保険
-        link_fe = page.get_by_role("link", name=re.compile(r"基本情報技術者試験\(FE\)"))
-        if link_fe.first.count():
-            link_fe.first.click(); page.wait_for_load_state("domcontentloaded")
-        link_apply = page.get_by_role("link", name=re.compile(r"CBT試験申込"))
-        if link_apply.first.count():
-            link_apply.first.click(); page.wait_for_load_state("domcontentloaded")
-        info(f"URL: {page.url}")
-        if on_area_date(page):
-            pass_mark("導線", "左メニューから到達"); return True
-
-        warn_mark("導線", "エリア・日程選択に未到達"); return False
+        ok = on_area_date(page)
+        if ok: pass_mark("導線", "手順どおり到達")
+        else:  warn_mark("導線", "エリア・日程に未到達")
+        return ok
     finally:
         group_end()
 
