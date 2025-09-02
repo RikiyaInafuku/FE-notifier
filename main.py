@@ -106,13 +106,9 @@ def parse_month_label(lb: str):
 
 # ===== Bootflat Selecter を介して選択するヘルパ =====
 def select_by_label(page, select_id: str, label_text: str) -> bool:
-    """
-    display:none の <select> でも、Bootflat の selecter('select', value) を使って選択する。
-    ラベル一致から value を引き、callback を発火させる。
-    """
     res = page.evaluate(
         """
-        (sid, label) => {
+        ({ sid, label }) => {
           const $ = window.jQuery;
           const el = document.getElementById(sid);
           if (!el) return 'NO_ELEM';
@@ -122,7 +118,7 @@ def select_by_label(page, select_id: str, label_text: str) -> bool:
           const val  = opt.value;
           try {
             if ($ && typeof $(el).selecter === 'function') {
-              $(el).selecter('select', val);      // callback(selectAutoBuild) を発火
+              $(el).selecter('select', val);
             } else {
               el.value = val;
               el.dispatchEvent(new Event('change', { bubbles: true }));
@@ -131,7 +127,7 @@ def select_by_label(page, select_id: str, label_text: str) -> bool:
           } catch (e) { return 'ERR:' + e; }
         }
         """,
-        select_id, label_text
+        {"sid": select_id, "label": label_text}
     )
     if res == "OK":
         pass_mark("選択", f"{select_id} ← {label_text}")
@@ -140,6 +136,19 @@ def select_by_label(page, select_id: str, label_text: str) -> bool:
         fail_mark("選択", f"{select_id} '{label_text}' 失敗: {res}")
         return False
 
+def options_of(page, select_id: str):
+    return page.evaluate(
+        """
+        ({ sid }) => {
+          const el = document.getElementById(sid);
+          if (!el) return [];
+          return Array.from(el.options || []).map(o => ({
+            value: o.value, label: (o.textContent||'').trim()
+          }));
+        }
+        """,
+        {"sid": select_id}
+    )
 def options_of(page, select_id: str):
     return page.evaluate(
         """
