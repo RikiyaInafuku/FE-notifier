@@ -1,7 +1,7 @@
 # main.py
 # FE（基本情報技術者：CBT）空席ウォッチャー
 # - Actionsログに PASS/WARN/FAIL を出力
-# - Bootflat Selecter 対応：ラッパーUIではなく jQuery selecter('select', value) で選択
+# - Bootflat Selecter対応: jQuery selecter('select', value) + change発火
 # - 「地域 → (待機) → 都道府県 → 月 → 日 → 検索」で抽出
 # - START_YM 以降の月 × 全日レンジを総当たり
 # - Gmail通知は SEND_EMAIL=true の時のみ
@@ -56,7 +56,7 @@ def check(cond: bool, step: str, ok: str, ng: str, critical: bool = False):
         if critical:
             raise RuntimeError(f"{step} 失敗: {ng}")
 
-# ===== ログイン入力の候補 & フォールバック =====
+# ===== ログイン入力フォールバック =====
 LOGIN_ID_CAND = [
     "input[name='loginId']", "input[name='userId']",
     "#loginId", "#userId",
@@ -74,15 +74,12 @@ def fill_any(page, selectors, value, step):
         loc = page.locator(sel).first
         if loc.count():
             try:
-                # Bootflatのラップで非表示でも fill は可能なことが多いが、
-                # 可視化待ちはしない（timeout回避）
-                loc.fill(value, timeout=5000)
+                loc.fill(value, timeout=5000)  # 非表示でも入ることがあるため可視待ちはしない
                 pass_mark(step, f"{sel} で入力")
                 return True
             except Exception as e:
                 warn_mark(step, f"{sel} 失敗: {e}")
-    fail_mark(step, f"{step} 候補全滅")
-    raise RuntimeError(f"{step} 失敗")
+    fail_mark(step, f"{step} 候補全滅"); raise RuntimeError(f"{step} 失敗")
 
 # ===== ユーティリティ =====
 def send_gmail(subject: str, body: str):
@@ -104,25 +101,25 @@ def parse_month_label(lb: str):
     m = re.search(r"(\d{4})年\s*(\d{1,2})月", lb)
     return (int(m.group(1)), int(m.group(2))) if m else None
 
-# ===== Bootflat Selecter を介して選択するヘルパ =====
+# ===== Bootflat Selecter を介して選択 =====
 def select_by_label(page, select_id: str, label_text: str) -> bool:
+    """display:none の <select> も jQuery selecter で選択し、必ず change を発火"""
     res = page.evaluate(
         """
         ({ sid, label }) => {
           const $ = window.jQuery;
           const el = document.getElementById(sid);
           if (!el) return 'NO_ELEM';
-          const opts = Array.from(el.options || []);
-          const opt  = opts.find(o => (o.textContent || '').trim() === label);
-          if (!opt)  return 'NO_OPT';
-          const val  = opt.value;
+          const opt = Array.from(el.options||[]).find(o => (o.textContent||'').trim() === label);
+          if (!opt) return 'NO_OPT';
+          const val = opt.value;
           try {
             if ($ && typeof $(el).selecter === 'function') {
               $(el).selecter('select', val);
             } else {
               el.value = val;
-              el.dispatchEvent(new Event('change', { bubbles: true }));
             }
+            el.dispatchEvent(new Event('change', { bubbles: true }));
             return 'OK';
           } catch (e) { return 'ERR:' + e; }
         }
@@ -132,23 +129,9 @@ def select_by_label(page, select_id: str, label_text: str) -> bool:
     if res == "OK":
         pass_mark("選択", f"{select_id} ← {label_text}")
         return True
-    else:
-        fail_mark("選択", f"{select_id} '{label_text}' 失敗: {res}")
-        return False
+    fail_mark("選択", f"{select_id} '{label_text}' 失敗: {res}")
+    return False
 
-def options_of(page, select_id: str):
-    return page.evaluate(
-        """
-        ({ sid }) => {
-          const el = document.getElementById(sid);
-          if (!el) return [];
-          return Array.from(el.options || []).map(o => ({
-            value: o.value, label: (o.textContent||'').trim()
-          }));
-        }
-        """,
-        {"sid": select_id}
-    )
 def options_of(page, select_id: str):
     return page.evaluate(
         """
@@ -273,31 +256,49 @@ def main():
             ok = goto_area_date_page(page)
             check(ok, "導線確認", "エリア・日程選択に到達", "ページ到達に失敗", True)
 
-            # --- エリア・日程選択（Bootflat経由で選ぶ） ---
+            # --- エリア・日程選択 ---
             group_start("エリア/日程選択")
 
             # 1) 地域
             select_by_label(page, "select_area", REGION_NAME)
-            # 都道府県の候補が埋まるまで待機（2件以上）
+
+            # 都道府県の候補が埋まるまで（ラッパーも監視）
             page.wait_for_function(
-                "document.querySelector('#select_pref') && document.querySelector('#select_pref').options.length > 1",
-                timeout=15000
+                """
+                () => {
+                  const s = document.querySelector('#select_pref');
+                  const w = document.querySelector('#select_pref + .selecter');
+                  const okSel = s && s.options && s.options.length > 1;
+                  const okWrap = w && w.querySelectorAll('.selecter-item').length > 1;
+                  return okSel || okWrap;
+                }
+                """,
+                timeout=30000
             )
 
             # 2) 都道府県
             select_by_label(page, "select_pref", PREF_NAME)
-            # 月・日が埋まるまで待機
+
+            # 月・日が埋まるまで
             page.wait_for_function(
-                "document.querySelector('#select_ym') && document.querySelector('#select_ym').options.length > 1 && "
-                "document.querySelector('#select_dt') && document.querySelector('#select_dt').options.length > 1",
-                timeout=15000
+                """
+                () => {
+                  const y  = document.querySelector('#select_ym');
+                  const d  = document.querySelector('#select_dt');
+                  const yw = document.querySelector('#select_ym + .selecter');
+                  const dw = document.querySelector('#select_dt + .selecter');
+                  const okY = (y && y.options.length > 1) || (yw && yw.querySelectorAll('.selecter-item').length > 1);
+                  const okD = (d && d.options.length > 1) || (dw && dw.querySelectorAll('.selecter-item').length > 1);
+                  return okY && okD;
+                }
+                """,
+                timeout=30000
             )
 
             # 3) 月/日 オプション取得
             ym_opts = options_of(page, "select_ym")
             dt_opts = [o for o in options_of(page, "select_dt") if o["label"] and "選択" not in o["label"]]
 
-            # START_YM 以降の月に限定
             sy, sm = map(int, START_YM.split("-"))
             ym_labels = []
             for o in ym_opts:
@@ -306,7 +307,6 @@ def main():
                     ym_labels.append(o["label"])
             if not ym_labels:
                 warn_mark("月", f"{START_YM} 以降の候補なし")
-
             if not dt_opts:
                 warn_mark("日", "有効な日レンジが見つからない")
 
@@ -316,17 +316,25 @@ def main():
             group_start("検索・抽出ループ")
 
             def click_search() -> bool:
-                btn = page.get_by_role("button", name="検索").first
+                # ページによっては #ACT_search が確実
+                btn = page.locator("#ACT_search").first
+                if not btn.count():
+                    btn = page.get_by_role("button", name="検索").first
                 if btn.count():
                     btn.click()
-                    page.wait_for_load_state("domcontentloaded")
+                    # 結果（表 or no-site）を待つ
+                    page.wait_for_function(
+                        "document.querySelector('#calendar tbody tr') || document.querySelector('.no-site')",
+                        timeout=20000
+                    )
                     pass_mark("会場検索", "検索押下"); return True
                 warn_mark("会場検索", "ボタンなし"); return False
 
             def extract_table_slots(selected_month: str, selected_day: str):
-                rows = page.locator("table").first.locator("tr")
-                if rows.count() == 0:
-                    warn_mark("会場表", "rows=0"); return
+                tables = page.locator("table")
+                if tables.count() == 0:
+                    warn_mark("会場表", "tableなし"); return
+                rows = tables.first.locator("tr")
                 matched = 0
                 for i in range(rows.count()):
                     r = rows.nth(i)
@@ -334,9 +342,12 @@ def main():
                     if r.locator("a").count():
                         name = (r.locator("a").first.inner_text() or "").strip()
                     else:
-                        try: name = (r.locator("td").first.inner_text() or "").strip()
-                        except Exception: name = ""
-                    if not name or not any(c in name for c in TARGET_CENTERS): continue
+                        try:
+                            name = (r.locator("td").first.inner_text() or "").strip()
+                        except Exception:
+                            name = ""
+                    if not name or not any(c in name for c in TARGET_CENTERS):
+                        continue
 
                     matched += 1; pass_mark("会場一致", name)
                     cells = r.locator("a:has-text('○'), button:has-text('○'), td:has-text('○')")
@@ -352,7 +363,8 @@ def main():
                         if href: line += f" | {href}"
                         found_lines.append(line)
                     pass_mark("枠抽出", f"{name}: {cnt}件")
-                if matched == 0: warn_mark("会場一致", "指定会場ヒットなし（表記ぶれの可能性）")
+                if matched == 0:
+                    warn_mark("会場一致", "指定会場ヒットなし（表記ぶれの可能性）")
 
             loop_months = ym_labels if ym_labels else [""]
             loop_days   = dt_opts   if dt_opts   else [{"label": "任意"}]
