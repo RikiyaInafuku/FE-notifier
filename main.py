@@ -1,8 +1,8 @@
 # main.py
 # FE（基本情報技術者：CBT）空席ウォッチャー
 # - Actionsログに PASS/WARN/FAIL を出力
-# - 「地域 → 2秒待ち → 都道府県 → 月 → 日 → 検索」で抽出
-# - START_YM 以降の月 × 全日レンジを総当たり
+# - UI: 「地域/都道府県/月/日 を select → 検索 → ○ を抽出」
+# - 2025-11以降の月 × 全日レンジを総当たり
 # - Gmail通知は SEND_EMAIL=true の時のみ
 
 import os, re, ssl, smtplib
@@ -48,12 +48,10 @@ def fail_mark(step: str, detail: str = ""): print(f"::error title={step}::FAIL {
 def group_start(title: str): print(f"::group::{title}")
 def group_end(): print("::endgroup::")
 def check(cond: bool, step: str, ok: str, ng: str, critical: bool = False):
-    if cond:
-        pass_mark(step, ok)
+    if cond: pass_mark(step, ok)
     else:
         fail_mark(step, ng)
-        if critical:
-            raise RuntimeError(f"{step} 失敗: {ng}")
+        if critical: raise RuntimeError(f"{step} 失敗: {ng}")
 
 # ===== ログイン入力の候補 & フォールバック =====
 LOGIN_ID_CAND = [
@@ -74,14 +72,11 @@ def fill_any(page, selectors, value, step):
         if loc.count():
             try:
                 loc.scroll_into_view_if_needed()
-                loc.wait_for(state="visible", timeout=10000)
                 loc.fill(value, timeout=5000)
-                pass_mark(step, f"{sel} で入力")
-                return True
+                pass_mark(step, f"{sel} で入力"); return True
             except Exception as e:
                 warn_mark(step, f"{sel} 失敗: {e}")
-    fail_mark(step, f"{step} 候補全滅")
-    raise RuntimeError(f"{step} 失敗")
+    fail_mark(step, f"{step} 候補全滅"); raise RuntimeError(f"{step} 失敗")
 
 # ===== ユーティリティ =====
 def send_gmail(subject: str, body: str):
@@ -115,7 +110,6 @@ def on_area_date(page) -> bool:
 def goto_area_date_page(page) -> bool:
     group_start("FE申込導線")
     try:
-        # マイページ中央のタイル
         link = page.get_by_role("link", name=re.compile(r"基本情報技術者試験\(FE\)\s*CBT試験申込"))
         if link.first.count():
             link.first.click(); page.wait_for_load_state("domcontentloaded")
@@ -132,7 +126,6 @@ def goto_area_date_page(page) -> bool:
         if on_area_date(page):
             pass_mark("導線", "到達(エリア・日程)"); return True
 
-        # ページ最下部の「申込再開」
         btn = page.get_by_role("button", name=re.compile(r"申込再開"))
         if not btn.first.count():
             btn = page.locator("a:has-text('申込再開'), button:has-text('申込再開')")
@@ -143,7 +136,6 @@ def goto_area_date_page(page) -> bool:
         if on_area_date(page):
             pass_mark("導線", "申込再開→到達"); return True
 
-        # Step1 の赤い「選択する/入力はこちらから」
         selbtn = page.get_by_role("button", name=re.compile(r"選択する|入力はこちらから"))
         if not selbtn.first.count():
             selbtn = page.locator("a:has-text('選択する'), a:has-text('入力はこちらから'), button:has-text('選択する')")
@@ -151,7 +143,6 @@ def goto_area_date_page(page) -> bool:
             selbtn.first.click(); page.wait_for_load_state("domcontentloaded")
         info(f"到達3: {page.url}")
 
-        # 試験一覧 → FE行の「次へ」
         row = page.locator("tr").filter(has_text=re.compile(r"基本情報技術者試験\(FE\).*科目A.*科目B"))
         if row.count() and row.first.get_by_role("button", name="次へ").count():
             row.first.get_by_role("button", name="次へ").click()
@@ -162,11 +153,12 @@ def goto_area_date_page(page) -> bool:
                 nx.first.click(); page.wait_for_load_state("domcontentloaded")
         info(f"到達4: {page.url}")
 
-        # アンケ：学生 + 同意する → 次へ
         if page.get_by_label("学生", exact=True).first.count():
-            page.get_by_label("学生", exact=True).first.check(); pass_mark("区分選択", "学生")
+            page.get_by_label("学生", exact=True).first.check()
+            pass_mark("区分選択", "学生")
         if page.get_by_label("同意する", exact=True).first.count():
-            page.get_by_label("同意する", exact=True).first.check(); pass_mark("同意確認", "同意する")
+            page.get_by_label("同意する", exact=True).first.check()
+            pass_mark("同意確認", "同意する")
         nx = page.get_by_role("button", name="次へ")
         if nx.first.count():
             nx.first.click(); page.wait_for_load_state("domcontentloaded")
@@ -186,7 +178,6 @@ def main():
         browser = p.chromium.launch(headless=True)
         context = browser.new_context()
         page = context.new_page()
-        page.set_default_timeout(30000)
         try:
             # --- ログイン ---
             group_start("IPAログイン")
@@ -219,45 +210,55 @@ def main():
             ok = goto_area_date_page(page)
             check(ok, "導線確認", "エリア・日程選択に到達", "ページ到達に失敗", True)
 
-            # --- エリア・日程選択（select取得＋2秒ディレイ） ---
+            # --- エリア・日程選択（非表示select対応＋プラグイン発火） ---
             group_start("エリア/日程選択")
 
-            def row_select(row_label: str):
-                row = page.locator("tr").filter(has_text=row_label)
-                if not row.count():
-                    fail_mark("選択行", f"'{row_label}' 行なし"); return None
-                sel = row.first.locator("select").first
+            def select_via_plugin(selector: str, *, label: str | None = None, value: str | None = None):
+                sel = page.locator(selector)
                 if not sel.count():
-                    fail_mark("選択UI", f"'{row_label}' に select なし"); return None
-                sel.scroll_into_view_if_needed()
-                sel.wait_for(state="visible", timeout=10000)
-                return sel
-
-            def select_label(sel, label: str) -> bool:
-                if not sel: return False
+                    fail_mark("選択UI", f"{selector} が見つからない"); return False
                 try:
-                    sel.select_option(label=label, timeout=30000)
-                    pass_mark("選択", f"{label}")
+                    if label is not None:
+                        sel.select_option(label=label, force=True, timeout=30000)
+                        picked = label
+                    else:
+                        sel.select_option(value=value, force=True, timeout=30000)
+                        picked = value or ""
+                    # Selecterプラグインのcallbackを発火
+                    page.evaluate(
+                        """(s)=>{var $=window.jQuery; if($ && $(s).selecter){ $(s).selecter('select', $(s).val()); }}""",
+                        selector,
+                    )
+                    pass_mark("選択", f"{selector} ← {picked}")
                     return True
                 except Exception as e:
-                    fail_mark("選択", f"'{label}' 選択失敗 ({e})")
+                    fail_mark("選択", f"{selector} 選択失敗: {e}")
                     return False
 
-            # 1) 地域 → 2秒待つ（都道府県候補が反映されるまで）
-            region_sel = row_select("地域")
-            select_label(region_sel, REGION_NAME)
-            page.wait_for_timeout(2000)
+            # 1) 地域 → 県のoptionが入るまで待つ
+            select_via_plugin("#select_area", label=REGION_NAME)
+            page.wait_for_function(
+                """()=>{const s=document.querySelector('#select_pref'); return s&&s.options&&s.options.length>=2;}""",
+                timeout=15000,
+            )
 
-            # 2) 都道府県（DOMが差し替わる可能性があるので取り直す）
-            pref_sel = row_select("都道府県")  # 取り直し
-            select_label(pref_sel, PREF_NAME)
+            # 2) 都道府県 → 月/日が入るまで待つ
+            select_via_plugin("#select_pref", label=PREF_NAME)
+            page.wait_for_function(
+                """()=>{const m=document.querySelector('#select_ym'); return m&&m.options&&m.options.length>=2;}""",
+                timeout=15000,
+            )
+            page.wait_for_function(
+                """()=>{const d=document.querySelector('#select_dt'); return d&&d.options&&d.options.length>=2;}""",
+                timeout=15000,
+            )
 
-            # 3) 月・日 select を取得
-            month_sel = row_select("月")
-            day_sel   = row_select("日")
-            check(bool(month_sel and day_sel), "セレクト取得", "月/日を取得", "月/日セレクトが無い", True)
+            # 3) 月・日 セレクト取得
+            month_sel = page.locator("#select_ym")
+            day_sel   = page.locator("#select_dt")
+            check(month_sel.count() and day_sel.count(), "セレクト取得", "月/日を取得", "月/日セレクトが無い", True)
 
-            # START_YM 以降の月に絞る
+            # START_YM 以降の月だけに絞る
             sy, sm = map(int, START_YM.split("-"))
             month_opts = []
             for i in range(month_sel.locator("option").count()):
@@ -284,9 +285,14 @@ def main():
             group_start("検索・抽出ループ")
 
             def click_search() -> bool:
-                btn = page.get_by_role("button", name="検索").first
+                btn = page.locator("#ACT_search").first
                 if btn.count():
-                    btn.click(); page.wait_for_load_state("domcontentloaded")
+                    btn.click()
+                    # 検索結果（カレンダー行 or no-site の表示）を待つ
+                    page.wait_for_function(
+                        """()=>document.querySelector('#calendar tbody tr') || document.querySelector('.no-site')""",
+                        timeout=20000,
+                    )
                     pass_mark("会場検索", "検索押下"); return True
                 warn_mark("会場検索", "ボタンなし"); return False
 
@@ -322,17 +328,24 @@ def main():
                     pass_mark("枠抽出", f"{name}: {cnt}件")
                 if matched == 0: warn_mark("会場一致", "指定会場ヒットなし（表記ぶれの可能性）")
 
-            # 総当たり：月 × 日
             loop_months = month_opts if month_opts else [""]
             loop_days   = day_opts   if day_opts   else [(1, "任意")]
 
             for m_lb in loop_months:
                 if m_lb:
-                    try: month_sel.select_option(label=m_lb); pass_mark("月選択", m_lb)
-                    except Exception as e: warn_mark("月選択", f"'{m_lb}' 選択失敗: {e}"); continue
+                    try:
+                        month_sel.select_option(label=m_lb, force=True)
+                        page.evaluate("""(s)=>{var $=window.jQuery; if($&&$(s).selecter){$(s).selecter('select', $(s).val());}}""", "#select_ym")
+                        pass_mark("月選択", m_lb)
+                    except Exception as e:
+                        warn_mark("月選択", f"'{m_lb}' 選択失敗: {e}"); continue
                 for day_index, day_lb in loop_days:
-                    try: day_sel.select_option(index=day_index); pass_mark("日選択", day_lb)
-                    except Exception as e: warn_mark("日選択", f"'{day_lb}' 選択失敗: {e}"); continue
+                    try:
+                        day_sel.select_option(index=day_index, force=True)
+                        page.evaluate("""(s)=>{var $=window.jQuery; if($&&$(s).selecter){$(s).selecter('select', $(s).val());}}""", "#select_dt")
+                        pass_mark("日選択", day_lb)
+                    except Exception as e:
+                        warn_mark("日選択", f"'{day_lb}' 選択失敗: {e}"); continue
                     if click_search(): extract_table_slots(m_lb or "(指定なし)", day_lb)
 
             group_end()
